@@ -34,9 +34,12 @@ async def update_xhs_note(note_item: Dict):
 
     video_url = ''
     if note_item.get('type') == 'video':
-        videos = note_item.get('video').get('media').get('stream').get('h264')
-        if type(videos).__name__ == 'list':
-            video_url = ','.join([v.get('master_url') for v in videos])
+        # 安全地获取视频URL，处理搜索结果中可能缺少的字段
+        video_info = note_item.get('video')
+        if video_info and video_info.get('media') and video_info.get('media').get('stream'):
+            videos = video_info.get('media').get('stream').get('h264')
+            if type(videos).__name__ == 'list':
+                video_url = ','.join([v.get('master_url') for v in videos])
 
     local_db_item = {
         "note_id": note_item.get("note_id"),

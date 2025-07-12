@@ -200,12 +200,27 @@ class XiaoHongShuClient(AbstractApiClient):
         """
         data = {"source_note_id": note_id}
         uri = "/api/sns/web/v1/feed"
-        res = await self.post(uri, data)
-        if res and res.get("items"):
-            res_dict: Dict = res["items"][0]["note_card"]
-            return res_dict
-        utils.logger.error(f"[XiaoHongShuClient.get_note_by_id] get note empty and res:{res}")
-        return dict()
+        try:
+            res = await self.post(uri, data)
+            if res and res.get("items"):
+                res_dict: Dict = res["items"][0]["note_card"]
+                utils.logger.info(f"[XiaoHongShuClient.get_note_by_id] Successfully got note {note_id}")
+                return res_dict
+            else:
+                utils.logger.warning(f"[XiaoHongShuClient.get_note_by_id] Note {note_id} not found or empty response: {res}")
+                return dict()
+        except DataFetchError as e:
+            error_msg = str(e)
+            if "当前笔记暂时无法浏览" in error_msg:
+                utils.logger.warning(f"[XiaoHongShuClient.get_note_by_id] Note {note_id} is not accessible: {error_msg}")
+            elif "笔记状态异常" in error_msg:
+                utils.logger.warning(f"[XiaoHongShuClient.get_note_by_id] Note {note_id} status abnormal: {error_msg}")
+            else:
+                utils.logger.error(f"[XiaoHongShuClient.get_note_by_id] Failed to get note {note_id}: {error_msg}")
+            raise  # 重新抛出异常，让上层处理
+        except Exception as e:
+            utils.logger.error(f"[XiaoHongShuClient.get_note_by_id] Unexpected error for note {note_id}: {e}")
+            return dict()
 
     async def get_note_comments(self, note_id: str, cursor: str = "") -> Dict:
         """

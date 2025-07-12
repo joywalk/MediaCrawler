@@ -1,6 +1,6 @@
 # 基础配置
 PLATFORM = "xhs"
-KEYWORDS = "python,golang"
+KEYWORDS = "python"
 LOGIN_TYPE = "qrcode"  # qrcode or phone or cookie
 COOKIES = ""
 # 具体值参见media_platform.xxx.field下的枚举值，暂时只支持小红书
@@ -8,6 +8,7 @@ SORT_TYPE = "popularity_descending"
 # 具体值参见media_platform.xxx.field下的枚举值，暂时只支持抖音
 PUBLISH_TIME_TYPE = 0
 CRAWLER_TYPE = "search"  # 爬取类型，search(关键词搜索) | detail(帖子详情)| creator(创作者主页数据)
+# 建议使用search模式，因为detail模式依赖预设的笔记ID，可能会因为笔记被删除或设为私密而失败
 
 # 是否开启 IP 代理
 ENABLE_IP_PROXY = False
@@ -36,11 +37,11 @@ USER_DATA_DIR = "%s_user_data_dir"  # %s will be replaced by platform name
 # 爬取开始页数 默认从第一页开始
 START_PAGE = 1
 
-# 爬取视频/帖子的数量控制
-CRAWLER_MAX_NOTES_COUNT = 20
+# 爬取视频/帖子的数量控制 - 减少数量以降低被检测风险
+CRAWLER_MAX_NOTES_COUNT = 5
 
-# 并发爬虫数量控制
-MAX_CONCURRENCY_NUM = 4
+# 并发爬虫数量控制 - 降低并发数以避免触发反爬虫
+MAX_CONCURRENCY_NUM = 1
 
 # 是否开启爬图片模式, 默认不开启爬图片
 ENABLE_GET_IMAGES = False
@@ -53,11 +54,17 @@ ENABLE_GET_COMMENTS = False
 ENABLE_GET_SUB_COMMENTS = False
 
 # 指定小红书需要爬虫的笔记ID列表
+# 注意：这些ID需要是公开可访问的笔记，建议从小红书网页版复制最新的笔记ID
+# 笔记ID可以从小红书笔记URL中获取，格式如：https://www.xiaohongshu.com/explore/[笔记ID]
 XHS_SPECIFIED_ID_LIST = [
-    "6422c2750000000027000d88",
-    "64ca1b73000000000b028dd2",
-    "630d5b85000000001203ab41",
-    # ........................
+    # 请替换为有效的笔记ID，可以通过以下方式获取：
+    # 1. 打开小红书网页版
+    # 2. 找到想要爬取的公开笔记
+    # 3. 从URL中复制笔记ID（explore/后面的字符串）
+    # 示例（请替换为实际有效的ID）：
+    # "65f1234567890abcdef12345",  # 替换为实际的笔记ID
+    # "65f1234567890abcdef12346",  # 替换为实际的笔记ID
+    # "65f1234567890abcdef12347",  # 替换为实际的笔记ID
 ]
 
 # 指定抖音需要爬取的ID列表

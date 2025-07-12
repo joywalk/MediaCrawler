@@ -108,20 +108,54 @@ class XiaoHongShuCrawler(AbstractCrawler):
                         page=page,
                         sort=SearchSortType(config.SORT_TYPE) if config.SORT_TYPE != '' else SearchSortType.GENERAL,
                     )
-                    utils.logger.info(f"[XiaoHongShuCrawler.search] Search notes res:{notes_res}")
-                    semaphore = asyncio.Semaphore(config.MAX_CONCURRENCY_NUM)
-                    task_list = [
-                        self.get_note_detail(post_item.get("id"), semaphore)
-                        for post_item in notes_res.get("items", {})
-                        if post_item.get('model_type') not in ('rec_query', 'hot_query')
-                    ]
-                    note_details = await asyncio.gather(*task_list)
-                    for note_detail in note_details:
-                        if note_detail is not None:
-                            await xhs_store.update_xhs_note(note_detail)
-                            note_id_list.append(note_detail.get("note_id"))
+                    utils.logger.info(f"[XiaoHongShuCrawler.search] Search notes res found {len(notes_res.get('items', []))} items")
+
+                    # 先保存搜索结果中的基本信息
+                    search_notes = []
+                    for post_item in notes_res.get("items", {}):
+                        if post_item.get('model_type') not in ('rec_query', 'hot_query'):
+                            note_card = post_item.get("note_card", {})
+                            if note_card:
+                                # 从搜索结果构建基本的笔记信息
+                                basic_note = {
+                                    "note_id": post_item.get("id"),
+                                    "title": note_card.get("display_title", ""),
+                                    "type": note_card.get("type", ""),
+                                    "user": note_card.get("user", {}),
+                                    "interact_info": note_card.get("interact_info", {}),
+                                    "image_list": note_card.get("image_list", []),
+                                    "time": note_card.get("corner_tag_info", [{}])[0].get("text", "") if note_card.get("corner_tag_info") else "",
+                                    "desc": note_card.get("display_title", ""),  # 使用标题作为描述
+                                    "note_url": f"https://www.xiaohongshu.com/explore/{post_item.get('id')}"
+                                }
+                                search_notes.append(basic_note)
+                                note_id_list.append(post_item.get("id"))
+
+                    # 保存搜索结果
+                    for note in search_notes:
+                        await xhs_store.update_xhs_note(note)
+
+                    utils.logger.info(f"[XiaoHongShuCrawler.search] Saved {len(search_notes)} notes from search results")
+
+                    # 尝试获取详情（如果失败也不影响搜索结果的保存）
+                    if config.ENABLE_GET_IMAGES or len(search_notes) <= 3:  # 只有在需要图片或笔记数量很少时才获取详情
+                        utils.logger.info("[XiaoHongShuCrawler.search] Attempting to get note details...")
+                        semaphore = asyncio.Semaphore(config.MAX_CONCURRENCY_NUM)
+                        task_list = [
+                            self.get_note_detail(note.get("note_id"), semaphore)
+                            for note in search_notes[:3]  # 只获取前3个的详情
+                        ]
+                        note_details = await asyncio.gather(*task_list)
+
+                        # 更新详情信息
+                        for note_detail in note_details:
+                            if note_detail is not None:
+                                await xhs_store.update_xhs_note(note_detail)
+
+                        successful_details = [d for d in note_details if d is not None]
+                        utils.logger.info(f"[XiaoHongShuCrawler.search] Successfully got {len(successful_details)} note details")
+
                     page += 1
-                    utils.logger.info(f"[XiaoHongShuCrawler.search] Note details: {note_details}")
                     await self.batch_get_note_comments(note_id_list)
                 except DataFetchError:
                     utils.logger.error("[XiaoHongShuCrawler.search] Get note detail error")
@@ -162,21 +196,45 @@ class XiaoHongShuCrawler(AbstractCrawler):
 
     async def get_specified_notes(self):
         """Get the information and comments of the specified post"""
+        if not config.XHS_SPECIFIED_ID_LIST:
+            utils.logger.warning("[XiaoHongShuCrawler.get_specified_notes] XHS_SPECIFIED_ID_LIST is empty, please add valid note IDs")
+            return
+
+        utils.logger.info(f"[XiaoHongShuCrawler.get_specified_notes] Starting to crawl {len(config.XHS_SPECIFIED_ID_LIST)} specified notes")
+
         semaphore = asyncio.Semaphore(config.MAX_CONCURRENCY_NUM)
         task_list = [
             self.get_note_detail(note_id=note_id, semaphore=semaphore) for note_id in config.XHS_SPECIFIED_ID_LIST
         ]
         note_details = await asyncio.gather(*task_list)
+
+        successful_notes = []
         for note_detail in note_details:
             if note_detail is not None:
                 await xhs_store.update_xhs_note(note_detail)
-        await self.batch_get_note_comments(config.XHS_SPECIFIED_ID_LIST)
+                successful_notes.append(note_detail.get("note_id"))
+
+        utils.logger.info(f"[XiaoHongShuCrawler.get_specified_notes] Successfully crawled {len(successful_notes)} out of {len(config.XHS_SPECIFIED_ID_LIST)} notes")
+
+        if successful_notes:
+            await self.batch_get_note_comments(successful_notes)
+        else:
+            utils.logger.warning("[XiaoHongShuCrawler.get_specified_notes] No notes were successfully crawled, skipping comment crawling")
 
     async def get_note_detail(self, note_id: str, semaphore: asyncio.Semaphore) -> Optional[Dict]:
         """Get note detail"""
         async with semaphore:
             try:
-                return await self.xhs_client.get_note_by_id(note_id)
+                # 添加随机延迟以避免触发反爬虫机制
+                import random
+                delay = random.uniform(2, 5)  # 2-5秒随机延迟
+                utils.logger.info(f"[XiaoHongShuCrawler.get_note_detail] Waiting {delay:.2f}s before fetching note {note_id}")
+                await asyncio.sleep(delay)
+
+                result = await self.xhs_client.get_note_by_id(note_id)
+                if result:
+                    utils.logger.info(f"[XiaoHongShuCrawler.get_note_detail] Successfully got note {note_id}")
+                return result
             except DataFetchError as ex:
                 utils.logger.error(f"[XiaoHongShuCrawler.get_note_detail] Get note detail error: {ex}")
                 return None
