@@ -1,10 +1,21 @@
+# 声明：本代码仅供学习和研究目的使用。使用者应遵守以下原则：  
+# 1. 不得用于任何商业用途。  
+# 2. 使用时应遵守目标平台的使用条款和robots.txt规则。  
+# 3. 不得进行大规模爬取或对平台造成运营干扰。  
+# 4. 应合理控制请求频率，避免给目标平台带来不必要的负担。   
+# 5. 不得用于任何非法或不当的用途。
+#   
+# 详细许可条款请参阅项目根目录下的LICENSE文件。  
+# 使用本代码即表示您同意遵守上述原则和LICENSE中的所有条款。  
+
+
 import asyncio
 import os
 import random
 from asyncio import Task
 from typing import Any, Dict, List, Optional, Tuple
 
-from playwright.async_api import (BrowserContext, BrowserType, Page,
+from playwright.async_api import (BrowserContext, BrowserType, Page, Playwright,
                                   async_playwright)
 
 import config
@@ -12,7 +23,8 @@ from base.base_crawler import AbstractCrawler
 from proxy.proxy_ip_pool import IpInfoModel, create_ip_pool
 from store import douyin as douyin_store
 from tools import utils
-from var import crawler_type_var
+from tools.cdp_browser import CDPBrowserManager
+from var import crawler_type_var, source_keyword_var
 
 from .client import DOUYINClient
 from .exception import DataFetchError
@@ -24,10 +36,11 @@ class DouYinCrawler(AbstractCrawler):
     context_page: Page
     dy_client: DOUYINClient
     browser_context: BrowserContext
+    cdp_manager: Optional[CDPBrowserManager]
 
     def __init__(self) -> None:
-        self.user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36"  # fixed
         self.index_url = "https://www.douyin.com"
+        self.cdp_manager = None
 
     async def start(self) -> None:
         playwright_proxy_format, httpx_proxy_format = None, None
@@ -37,14 +50,23 @@ class DouYinCrawler(AbstractCrawler):
             playwright_proxy_format, httpx_proxy_format = self.format_proxy_info(ip_proxy_info)
 
         async with async_playwright() as playwright:
-            # Launch a browser context.
-            chromium = playwright.chromium
-            self.browser_context = await self.launch_browser(
-                chromium,
-                None,
-                self.user_agent,
-                headless=config.HEADLESS
-            )
+            # 根据配置选择启动模式
+            if config.ENABLE_CDP_MODE:
+                utils.logger.info("[DouYinCrawler] 使用CDP模式启动浏览器")
+                self.browser_context = await self.launch_browser_with_cdp(
+                    playwright, playwright_proxy_format, None,
+                    headless=config.CDP_HEADLESS
+                )
+            else:
+                utils.logger.info("[DouYinCrawler] 使用标准模式启动浏览器")
+                # Launch a browser context.
+                chromium = playwright.chromium
+                self.browser_context = await self.launch_browser(
+                    chromium,
+                    playwright_proxy_format,
+                    user_agent=None,
+                    headless=config.HEADLESS
+                )
             # stealth.min.js is a js script to prevent the website from detecting the crawler.
             await self.browser_context.add_init_script(path="libs/stealth.min.js")
             self.context_page = await self.browser_context.new_page()
@@ -81,19 +103,26 @@ class DouYinCrawler(AbstractCrawler):
             config.CRAWLER_MAX_NOTES_COUNT = dy_limit_count
         start_page = config.START_PAGE  # start page number
         for keyword in config.KEYWORDS.split(","):
+            source_keyword_var.set(keyword)
             utils.logger.info(f"[DouYinCrawler.search] Current keyword: {keyword}")
             aweme_list: List[str] = []
             page = 0
+            dy_search_id = ""
             while (page - start_page + 1) * dy_limit_count <= config.CRAWLER_MAX_NOTES_COUNT:
                 if page < start_page:
                     utils.logger.info(f"[DouYinCrawler.search] Skip {page}")
                     page += 1
                     continue
                 try:
+                    utils.logger.info(f"[DouYinCrawler.search] search douyin keyword: {keyword}, page: {page}")
                     posts_res = await self.dy_client.search_info_by_keyword(keyword=keyword,
                                                                             offset=page * dy_limit_count - dy_limit_count,
-                                                                            publish_time=PublishTimeType(config.PUBLISH_TIME_TYPE)
+                                                                            publish_time=PublishTimeType(config.PUBLISH_TIME_TYPE),
+                                                                            search_id=dy_search_id
                                                                             )
+                    if posts_res.get("data") is None or posts_res.get("data") == []:
+                        utils.logger.info(f"[DouYinCrawler.search] search douyin keyword: {keyword}, page: {page} is empty,{posts_res.get('data')}`")
+                        break
                 except DataFetchError:
                     utils.logger.error(f"[DouYinCrawler.search] search douyin keyword: {keyword} failed")
                     break
@@ -103,7 +132,7 @@ class DouYinCrawler(AbstractCrawler):
                     utils.logger.error(
                         f"[DouYinCrawler.search] search douyin keyword: {keyword} failed，账号也许被风控了。")
                     break
-
+                dy_search_id = posts_res.get("extra", {}).get("logid", "")
                 for post_item in posts_res.get("data"):
                     try:
                         aweme_info: Dict = post_item.get("aweme_info") or \
@@ -165,7 +194,8 @@ class DouYinCrawler(AbstractCrawler):
                     aweme_id=aweme_id,
                     crawl_interval=random.random(),
                     is_fetch_sub_comments=config.ENABLE_GET_SUB_COMMENTS,
-                    callback=douyin_store.batch_update_dy_aweme_comments
+                    callback=douyin_store.batch_update_dy_aweme_comments,
+                    max_count=config.CRAWLER_MAX_COMMENTS_COUNT_SINGLENOTES
                 )
                 utils.logger.info(
                     f"[DouYinCrawler.get_comments] aweme_id: {aweme_id} comments have all been obtained and filtered ...")
@@ -224,7 +254,7 @@ class DouYinCrawler(AbstractCrawler):
         douyin_client = DOUYINClient(
             proxies=httpx_proxy,
             headers={
-                "User-Agent": self.user_agent,
+                "User-Agent": await self.context_page.evaluate("() => navigator.userAgent"),
                 "Cookie": cookie_str,
                 "Host": "www.douyin.com",
                 "Origin": "https://www.douyin.com/",
@@ -264,7 +294,41 @@ class DouYinCrawler(AbstractCrawler):
             )
             return browser_context
 
+    async def launch_browser_with_cdp(self, playwright: Playwright, playwright_proxy: Optional[Dict],
+                                     user_agent: Optional[str], headless: bool = True) -> BrowserContext:
+        """
+        使用CDP模式启动浏览器
+        """
+        try:
+            self.cdp_manager = CDPBrowserManager()
+            browser_context = await self.cdp_manager.launch_and_connect(
+                playwright=playwright,
+                playwright_proxy=playwright_proxy,
+                user_agent=user_agent,
+                headless=headless
+            )
+
+            # 添加反检测脚本
+            await self.cdp_manager.add_stealth_script()
+
+            # 显示浏览器信息
+            browser_info = await self.cdp_manager.get_browser_info()
+            utils.logger.info(f"[DouYinCrawler] CDP浏览器信息: {browser_info}")
+
+            return browser_context
+
+        except Exception as e:
+            utils.logger.error(f"[DouYinCrawler] CDP模式启动失败，回退到标准模式: {e}")
+            # 回退到标准模式
+            chromium = playwright.chromium
+            return await self.launch_browser(chromium, playwright_proxy, user_agent, headless)
+
     async def close(self) -> None:
         """Close browser context"""
-        await self.browser_context.close()
+        # 如果使用CDP模式，需要特殊处理
+        if self.cdp_manager:
+            await self.cdp_manager.cleanup()
+            self.cdp_manager = None
+        else:
+            await self.browser_context.close()
         utils.logger.info("[DouYinCrawler.close] Browser context closed ...")
